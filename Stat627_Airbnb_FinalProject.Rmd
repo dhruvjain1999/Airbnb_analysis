@@ -1,0 +1,1031 @@
+---
+title: "Report on Airbnb"
+author: "Dhruv Jain & Venkata Dhanush Kikkisetti" 
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: true
+    number_sections: true
+fontsize: 11pt
+geometry: margin=1cm
+linkcolor: blue
+theme: cerulean
+---
+
+------------------------------------------------------------------------
+
+\newpage
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# tinytex::reinstall_tinytex(repository = "https://mirrors.illinois.edu/CTAN/systems/texlive/tlnet")
+
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# install.packages(Quandl)
+library(randomForest)
+library(tree)
+library(car)
+library(glmnet)
+library(e1071)
+library(stringr)
+library(class)
+library(ISLR2)
+library(MASS, exclude='select')
+library(tidyverse)
+library(dplyr)
+library(class)
+library(knitr)
+# to make sure dplyr's select function get called when select instead of MASS
+select <- dplyr::select
+```
+
+
+
+# 1. Loading the Data.
+
+Let us see the Number of NA values from each column on the dataset. There are a lot of columns that have NA values in them. We will have replace them either with their median or remove the rows with NA values. Before we do that, we have to split the data to train and test set. Then We have to do transformation both on the trains set and test set.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+airbnb<-read_csv("Airbnb.csv")
+
+glimpse(airbnb)
+## Lets first get rid of the text's, URLS and few details about host.
+airbnb%>%
+  select(-c('name','description','neighborhood_overview','picture_url','host_url','host_about',
+            'host_verifications','neighbourhood','listing_url',
+            'scrape_id','last_scraped','host_thumbnail_url','host_picture_url',
+            'calendar_updated','bathrooms','license'))->airbnb
+map_df(airbnb,~sum(is.na(.)))
+
+
+```
+
+70% of the dataset will be reserved for train set and 30% will be reserved for test set.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# Let us take 70% the data for train and 30% for the test set. 
+set.seed(1234)
+Z <- sample(nrow(airbnb), .7* nrow(airbnb))
+train <- airbnb[Z,]
+test <- airbnb[-Z,]
+
+
+```
+
+Now we will start transforming the train set. Whatever we do on the train set, we also have to transform the test set.
+
+Let us first Convert total amenities that are in text to total number of amenities in number. This might be a useful transformed column that might affect whether host is super host or not.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+#Convert total amenities that are in text to total number of amenities in number.
+
+train%>%
+  mutate(amenities_count=str_count(amenities,',')+1)->train
+
+test%>%
+  mutate(amenities_count=str_count(amenities,',')+1)->test
+
+map_df(train,~sum(is.na(.)))
+```
+
+There are a lot of null values for quantitative variables i.e review_scores_checkin, review_scores_communication etc. We lose a lot of data if we remove these null value rows. Lets look at the distribution of the values for these variables with removing null values and see if we can replace the null values with the mean or median.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+train%>%
+  filter(!is.na(review_scores_rating))%>%
+  ggplot(mapping = aes(x=review_scores_rating))+
+  geom_histogram()
+```
+
+The distribution is left skewed, lets do the log transformation and look at the distribution.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+train%>%
+  filter(!is.na(review_scores_rating))%>%
+  ggplot(mapping = aes(x=log(review_scores_rating)))+
+  geom_histogram()
+```
+
+Even the log distribution is left skewed. Lets change the null values of review_scores_rating variable with the median of the distribution as mean will get affected with the skewed distribution. When we transform the data on the training set, we have to note what the median value is on the training set. That will be the value that we will eventually use on our test (instead of converting the NA values on test set with the median of the test set so that we prevent data leakage and have fair evaluation). Both our classification and regression use this column.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# we have to store it here. 
+medianReviewScoresRating <- median(train$review_scores_rating,na.rm = TRUE)
+train$review_scores_rating[is.na(train$review_scores_rating)]<-median(train$review_scores_rating,na.rm = TRUE)
+test$review_scores_rating[is.na(test$review_scores_rating)]<-medianReviewScoresRating
+
+```
+
+Our regression also uses number of bedrooms column and there are some NA values in it. So let us also replace the NA values with the median.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+medianBedRooms <-  median(train$bedrooms, na.rm=TRUE )
+train <- train %>% mutate(across(bedrooms, ~replace_na(., median(., na.rm=TRUE))))
+test <- test %>% mutate(across(bedrooms, ~replace_na(., medianBedRooms)))
+
+train%>% summarise(across(everything(), ~ sum(is.na(.))))
+
+```
+
+We have one more variable with a lot of NA values i.e reviews per month. It might be a good predictor variables and might have a impact on the response variables. So lets do some data transformation for that variables since removal of rows will reduce a lot of information in the data.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+train%>%
+  filter(!is.na(reviews_per_month))%>%
+  ggplot(mapping = aes(x=reviews_per_month))+
+  geom_histogram()
+```
+
+There is a huge outlier in the dataset that have a huge impact on the distribution.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+summary(train$reviews_per_month,na.rm = TRUE)
+
+sort(train$reviews_per_month,decreasing = TRUE)[1:40]
+```
+
+We have around 38K rows and we have few outliers that completely change the shape of the distribution for reviews_per_month variable. Although we can remove outliar s on both trainset and test set, we are not going to do that. We don't have any evidence whether those outliers are because of measurement errors or some sort of error when entered in the dataset. So we are going to keep them. removing them here would also mean removing them from unseen test data. But we still want to show the distribution of the data and see the skew so that we can note that there are outleirs.
+
+The distribution is right skewed. Lets the check the distribution with log transformation.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+airbnb%>%
+  filter(!is.na(reviews_per_month))%>%
+  ggplot(mapping = aes(x=reviews_per_month))+
+  geom_histogram()
+
+summary(airbnb$reviews_per_month,na.rm = TRUE)
+
+```
+
+Replace the null values with the median of the review_per_month distribution.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+MedianReviewsPerMonth <- median(train$reviews_per_month,na.rm = TRUE)
+train$reviews_per_month[is.na(train$reviews_per_month)]<-median(train$reviews_per_month,na.rm = TRUE)
+test$reviews_per_month[is.na(test$reviews_per_month)]<- MedianReviewsPerMonth
+
+```
+
+Remove Na variables from the training set. We will have do this step again on the test set as well. Also remove some columns from the training set such as id, source and amenities. Amenities column have already been transformed to a new column we can drop it here.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+map_df(train,~sum(is.na(.)))
+
+train%>%
+  filter(!is.na(beds) & !is.na(neighbourhood_group_cleansed)&!is.na(host_is_superhost)& !is.na(host_name) & !is.na(bathrooms_text))->train
+
+test%>%
+  filter(!is.na(beds) & !is.na(neighbourhood_group_cleansed)&!is.na(host_is_superhost)& !is.na(host_name) & !is.na(bathrooms_text))->test
+
+
+#get rid of amenities as we transformed it into a new count variable and other variables that are not necessaary 
+train%>%
+  select(-c('id','source','amenities'))->train
+
+test%>%
+  select(-c('id','source','amenities'))->test
+
+
+head(train)
+
+#there are still N/A in the response_rate variable and host_acceptance_rate, we have to convert datatype to int. 
+sum(train$host_response_rate=='N/A')
+```
+
+## Data transformations and EDA
+
+Let us convert the text bath rooms into the numeric columns. Also after doing that let us also remove the NA values from them.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+#parsing number
+train$bathroom<-parse_number( train$bathrooms_text,na=c("",'NA','Shared half-bath','Half-bath','Private half-bath'))
+
+test$bathroom<-parse_number( test$bathrooms_text,na=c("",'NA','Shared half-bath','Half-bath','Private half-bath'))
+
+train%>%
+  filter(!is.na(bathroom))->train
+
+test%>%
+  filter(!is.na(bathroom))->test
+
+```
+
+Analyzing the different types of rooms .
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+unique(train$room_type)
+```
+
+This is also just looking into the distribution of renters by neighborhood in NewYork.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+#Checking the counts for each levels in the variable. 
+train%>%
+  group_by(neighbourhood_group_cleansed)%>%
+  summarise(count=n())
+
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+train%>% summarise(across(everything(), ~ sum(is.na(.))))
+
+```
+
+So far all these preprocessing steps will be the same for both classification and regression. We will take this train and test data set.Then based on the need of regression and classification we will be selecting columns according to our need.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+nrow(train)
+nrow(test)
+
+```
+
+## 1. Classification and regression Models
+
+Creating train and test variable for classification and regression so that both teams can work off separately.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+# Saving the training into separate data frames for classification and regression. The classification team uses the train_cf and test_cf data frame and the regression team uses train_reg and test_reg.
+train_cf <- train
+train_reg <- train 
+
+test_cf <- test
+test_reg <- test
+
+
+
+```
+
+## Classification
+
+### Necessary data cleaning, data transformation and data pre-processing.
+
+The price column is supposed to be quantitative variable as it is measured in the number. However in the dataset it is given as charecter as dollar sybmol is used to represent the price. So we transformed the price variable into its ideal type and worked on it. Let us also remove NA values from the price column. This is also our dependent variable for regression and we have to make sure there are no NA values in it.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+train_cf$price<- parse_number(train_cf$price,na=c("",'NA')) 
+test_cf$price<-parse_number(test_cf$price,na=c("",'NA'))
+summary(train_cf$price)
+
+train_cf
+```
+
+For classification, we can further remove these columns.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+#We can remove 'maximum_maximum_nights,minimum_maximum_nights,maximum_minimum_nights,minimum_minimum_nights' as they are computed as average minimum and maximum night values
+train_cf%>%
+  select(-c('maximum_maximum_nights','minimum_minimum_nights','maximum_minimum_nights','minimum_maximum_nights'))->train_cf
+
+test_cf%>%
+  select(-c('maximum_maximum_nights','minimum_minimum_nights','maximum_minimum_nights','minimum_maximum_nights'))->test_cf
+
+
+
+```
+
+There are like 5-6 variables related to review scores and in overall all are related to each other. So let us only keep the review score rating and get rid of other variables like review_scores_accuracy, review_scores_cleanliness, review_scores_checkin etc.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+train_cf%>%
+  select(-c('review_scores_accuracy','review_scores_cleanliness','review_scores_checkin','review_scores_location','review_scores_value','first_review','last_review','review_scores_communication'))->train_cf
+
+test_cf%>%
+  select(-c('review_scores_accuracy','review_scores_cleanliness','review_scores_checkin','review_scores_location','review_scores_value','first_review','last_review','review_scores_communication'))->test_cf
+
+
+#Host location is not important either
+train_cf%>%
+  select(-c('host_location'))->train_cf
+
+test_cf%>%
+  select(-c('host_location'))->test_cf
+
+
+map_df(train_cf,~sum(is.na(.)))
+```
+
+## Introduction and Background:
+
+Customer satisfaction is one of the primary objective that every business owner will focus on. Providing them with the best of what they asked for is very important to run a successful business.This is where a strong trust will establish between customers and business domain .In this project we will be focusing on airbnb data with main idea to analyze the historical data we have and find pattern in the data that can help improve the customer satisfaction and help the company increase their business.
+
+<!-- For this project, we had an opportunity to analyze the Airbnb business data and create few machine learning models to find patterns in the dataset. -->
+
+Let us have a look at the dataset and see what all variables we have:
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+glimpse(train_cf)
+```
+
+The dataset contains information about the host who has a listing in airbnb, information/specifications about the listings. Here we can improve the customers satisfaction by providing them a measure that assist them to get the best stay with the all the possibilities they have In the data set we have a variable called "host is superhost" which is a Boolean variable which says if the host, who has his listings in airbnb, is given a badge called superhost by the airbnb management.
+
+This is how the Airbnb management provide the superhost badge to the hosts: They say a Superhost is a Host who goes above and beyond to provide excellent hospitality. The guests can easily identify a Superhost from the badge that appears on their Airbnb listing and profile. These are the requirement the host should have that are set by Airbnb to receive a badge a super host: - completed at least 10 trips or 3 reservations that total at least 100 nights - Maintained a 90% response rate or higher - Maintained a less than 1% cancellation rate, with exceptions made for those that fall under our Extenuating Circumstances policy - Maintained a 4.8 overall rating (A review counts towards superhost status when either both the guest and the Host have submitted a review, or the 14-day window for reviews is over, whichever comes first).
+
+These are the 4 main characteristics the airbnb focus on to provide a superhost badge. However there are many variables in the dataset that might have different patterns in the data for both superhost and not superhost.
+
+So the main idea is to create a classification task to classify if the host is superhost with considering the predictor variables that has a good impact and adds weightage to predict if the host is superhost. This will helps the airbnb company to make more legitimate decisions if the host is eligible for receiving the superhost badge without only considering their specific requirements but also with all the data they have regarding the host as well as listings. They will also gain more trust with their customers and also help him to make better decision with the host is superhost variable.
+
+<!-- We want to find patterns in the data to see the requirements the airbnb have to assign a host as superhost.So, It is important to focus on different characteristics of the host and also the characteristics that host provides to his/her listing.-->
+
+## Data pre-processing and EDA:
+
+Before we fit any models we have to make sure that the data is clean, transformed into its original form and ready to fit the machine learning models.
+
+Lets first look at the distribution of in host_is_superhost column
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+table(train_cf$host_is_superhost)
+#Draw a bar plot here
+ggplot(data=train_cf,mapping = aes(x=host_is_superhost,fill=host_is_superhost))+
+  geom_bar()+
+  theme_bw()+
+  xlab("Is host is super host ")
+  
+```
+
+Around 20 to 25 % seem to be super host which is reasonable.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+train_cf%>% summarise(across(everything(), ~ sum(is.na(.))))
+
+```
+
+-   It appears there are still null values in a host_neighbourhood column and it is 20% of the complete train data. Removing all those will result in data truncation. Host neighborhood contains the neighborhood counties of the host and we think it will effect the superhost decision. So we get rid of the column data.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+train_cf%>%
+  select(-host_neighbourhood)->train_cf
+test_cf%>%
+  select(-host_neighbourhood)->test_cf
+
+table(train_cf$host_is_superhost)
+```
+
+For the variables host_reponse_time and host_acceptance_rate which is of character type also has NA values in it. We cannot remove those columns as they will have significant impact on the response variable. so simply lets get rid of NA values for these columns in both train and test set.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+train_cf%>%
+  filter(host_response_rate!="N/A")->train_cf
+train_cf%>%
+  filter(host_acceptance_rate!="N/A")->train_cf
+test_cf%>%
+  filter(host_response_rate!="N/A")->test_cf
+
+test_cf%>%
+  filter(host_acceptance_rate!="N/A")->test_cf
+```
+
+## Type Conversion:
+
+There are 4 important variables that shows about the characteristics of the host and are very essential for predicting host is superhost that are in wrong data type. So we have to convert it into its original type for both train and test data.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+train_cf$host_response_rate<-parse_number(train_cf$host_response_rate,na=c("","NA"))
+test_cf$host_response_rate<-parse_number(test_cf$host_response_rate,na=c("","NA")) 
+
+train_cf$host_acceptance_rate<-parse_number(train_cf$host_acceptance_rate,na=c("","NA"))
+test_cf$host_acceptance_rate<-parse_number(test_cf$host_acceptance_rate,na=c("","NA"))
+
+
+train_cf$host_since<-parse_date(train_cf$host_since,format = "%d/%m/%y")
+test_cf$host_since<-parse_date(test_cf$host_since,format = "%d/%m/%y")
+
+train_cf$host_response_time<-unclass(as.factor(train_cf$host_response_time))
+test_cf$host_response_time<-unclass(as.factor(test_cf$host_response_time))
+train_cf <- train_cf %>% na.omit()
+test_cf <- test_cf %>% na.omit()
+
+
+
+map_df(train_cf,~sum(is.na(.)))
+
+head(train_cf)  
+
+
+```
+
+Finally lets look the distribution of levels in superhost.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+table(train_cf$host_is_superhost)
+
+```
+
+Now we are good with the NA values and other data transformation that are essential for model fiting. However we have few variables in the dataset that doesn't make such sense or adds weightage to predict host is super host like host_id, host_name, neighbourhood_cleansed, neighbourhood_group_cleansed etc. So we get rid of all those and only consider variables that displays the charecteristics of the host and his listings.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+train_cf %>%
+  select(c('host_since','host_response_time','host_response_rate','host_acceptance_rate','host_is_superhost','host_total_listings_count','host_has_profile_pic','host_identity_verified','calculated_host_listings_count','calculated_host_listings_count_entire_homes','calculated_host_listings_count_private_rooms','calculated_host_listings_count_shared_rooms','instant_bookable','availability_30','price','amenities_count','bathroom','accommodates','beds','minimum_nights','review_scores_rating','reviews_per_month'))->train_cf
+
+test_cf %>%
+  select(c('host_since','host_response_time','host_response_rate','host_acceptance_rate','host_is_superhost','host_total_listings_count','host_has_profile_pic','host_identity_verified','calculated_host_listings_count',,'calculated_host_listings_count_entire_homes','calculated_host_listings_count_private_rooms','calculated_host_listings_count_shared_rooms','instant_bookable','availability_30','price','amenities_count','bathroom','accommodates','beds','minimum_nights','review_scores_rating','reviews_per_month'))->test_cf
+
+head(train_cf)
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+dim(train_cf)
+dim(test_cf)
+
+```
+
+The dataset is now clean with around 17194 observations (for training set) and 4423 for test set and 22 variables are used to uncover the different characteristics of the host to classify whether the host is considered super host or not.
+
+## Modeling
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+table(test_cf$host_is_superhost)
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# Split the data into a training set and a test set
+set.seed(123)
+trainIndex <- train_cf
+trainData <- train_cf
+testData <- test_cf
+head(trainData)
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# Logistic Regression Full model
+lreg_fit <- glm(
+as.factor(host_is_superhost) ~ .,
+family = "binomial", data = train_cf
+)
+summary(lreg_fit)
+```
+
+## Find the most significant predictor variables from the logistic regression and use the reduced model for analysis.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+lreg_fit <- glm(
+  as.factor(host_is_superhost) ~ host_since + host_acceptance_rate +host_response_time+review_scores_rating+reviews_per_month+
+  host_total_listings_count + host_has_profile_pic +host_response_rate+
+  calculated_host_listings_count_entire_homes + 
+  calculated_host_listings_count_private_rooms  + instant_bookable +price+
+  availability_30 + amenities_count ,
+  family = "binomial", data = train_cf
+)
+summary(lreg_fit)
+
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# LDA
+lda_fit <- lda(
+  as.factor(host_is_superhost) ~ host_since + host_acceptance_rate +host_response_time+review_scores_rating+reviews_per_month+
+  host_total_listings_count + host_has_profile_pic +host_response_rate+
+  calculated_host_listings_count_entire_homes + price+
+  calculated_host_listings_count_private_rooms  + instant_bookable +
+  availability_30 + amenities_count ,
+  data = train_cf
+)
+
+#lda_fit
+lda_fit
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# QDA
+qda_fit <- qda(
+  as.factor(host_is_superhost) ~ host_since + host_acceptance_rate ++host_response_time+review_scores_rating+reviews_per_month+
+  host_total_listings_count + host_has_profile_pic +host_response_rate+
+  calculated_host_listings_count_entire_homes + price+
+  calculated_host_listings_count_private_rooms  + instant_bookable +
+  availability_30 + amenities_count ,
+  data = trainData
+)
+
+qda_fit
+```
+
+## Summarize your findings in terms of the correct classification rate.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# Logistic Regression
+lreg_pred <- predict(lreg_fit, newdata=testData, type="response")
+lreg_class <- ifelse(lreg_pred > 0.5, 1, 0)
+lreg_accuracy <- mean(lreg_class == testData$host_is_superhost)
+
+# LDA
+lda_pred <- predict(lda_fit, newdata=testData)$class
+lda_accuracy <- mean(lda_pred == testData$host_is_superhost)
+
+# QDA
+qda_pred <- predict(qda_fit, newdata=testData)$class
+qda_accuracy <- mean(qda_pred == testData$host_is_superhost)
+
+c(lreg_accuracy, lda_accuracy, qda_accuracy)
+```
+
+LDA and Logistic regression appear to have higer accuracy on the test set. This is an indication that the data might be linearly separable
+
+## Let's now explore KNN as well with the predictors from the reduced model to identify the best k and its correct classification rate.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+ cols <- c( 'host_acceptance_rate',
+  'host_total_listings_count', 'host_has_profile_pic','host_response_rate',
+'calculated_host_listings_count_entire_homes', 'price',
+  'calculated_host_listings_count_private_rooms','instant_bookable',
+  'availability_30', 'amenities_count','host_response_time','review_scores_rating','reviews_per_month')
+
+trainMat <- trainData[, cols]
+testMat <- testData[, cols]
+trainMat$host_response_time<-as.double(trainMat$host_response_time)
+testMat$host_response_time<-as.double(testMat$host_response_time)
+
+Ytrain <- trainData$host_is_superhost # Our training set y
+Ytest <- testData$host_is_superhost
+head(trainMat)
+map_df(testMat,~sum(is.na(.)))
+
+dim(testMat)
+```
+
+Let's fine tune the best k parameter with training model on different K's on the training dataset and choose k that has less error rate on test dataset. Let's choose a k value from 1 to 50
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+#Initialize error.rate variable to store error rates for different K's
+error.rate<-rep(NA,50)
+
+for (j in seq_along(1:50)) {
+  Y_prediction<-knn(train = trainMat,test = testMat,k=j,cl = Ytrain)
+  er<-1-mean(Ytest==Y_prediction)
+  error.rate[j]<-er
+}
+
+min<-which.min(error.rate)
+error.rate[min]
+```
+
+## Let's explore KNN as to identify the best k and its correct classification rate.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+set.seed(1235)
+# Initialize variables to store the results
+best_k <- 0
+lowest_error_rate <- 1
+# Data frame to store k and associated error rates
+k_errors <- data.frame(k = integer(), ErrorRate = numeric())
+# Loop through 50 different k values
+for (k in 1:50) {
+# Use the k-NN algorithm to make predictions
+predictions <- knn(train = trainMat, test = testMat, cl = Ytrain, k = k)
+# Compute the confusion matrix and error rate
+confusion_mat <- table(Ytest, predictions)
+error_rate <- 1 - sum(diag(confusion_mat)) / sum(confusion_mat)
+# Update the best k value if this error rate is lower than the current lowest
+if (error_rate < lowest_error_rate) {
+lowest_error_rate <- error_rate
+
+best_k <- k
+}
+# Append to k_errors data frame
+k_errors <- rbind(k_errors, data.frame(k = k, ErrorRate = error_rate))
+}
+# Display the best k and the associated error rate
+print(paste("The best k is ", best_k, " with an error rate of ", round(lowest_error_rate * 100, 2), "%"))
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+#Plotting k vs. Error Rate
+ggplot( mapping=aes(x = 1:50, y = error.rate)) +
+geom_point() + # Scatter plot
+geom_line() + # Line plot
+ggtitle("Error Rate vs. k for k-NN") +
+xlab("Value of k") +
+ylab("Error Rate") +
+geom_text(aes(label=sprintf("%.2f", round(error.rate, digits = 2))), vjust=-1, size=3)
+```
+
+## Observation
+
+The best k is 11 with the lowest error rate
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+knn_pred<-knn(train = trainMat,test = testMat,k=11,cl = Ytrain)
+knn_acc<-mean(knn_pred==Ytest)
+knn_acc
+```
+
+### We have Knn accuracy with the best k still performing lower than both logistic and QDA
+
+-   Let's now explore Support Vector Machine on our dataset
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+SVM_all <- svm(as.factor(host_is_superhost) ~ ., data = trainData, kernel = "linear")
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# fit an svm model to training data
+Yhat_all <- predict(SVM_all, newdata = testData)
+table(Yhat_all, testData$host_is_superhost)
+
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# let's check the accuracy on the test set
+mean(Yhat_all == testData$host_is_superhost)
+```
+
+## With SVM, we got about 78% on the test
+
+-   Let's tune the hyperparameters - kernel and the cost budget
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+set.seed(123)
+SVMtuning <- tune(svm, as.factor(host_is_superhost) ~ ., data = trainData,
+                  ranges = list(kernel = c("linear",
+                                            "polynomial", "radial", "sigmoid")))
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+1 - SVMtuning$best.performance
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+summary(SVMtuning) # provides three outputs
+```
+
+## It looks like radial kernel is the best for this dataset
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+plot(SVMtuning)
+```
+
+## Radial kernel has the least error as seen in the plot.
+
+Lets now tune SVM based on Cost Budget.
+
+`Note we can tune svm based on both kernel and cost budget and select the best combination of the two but that's computation intensive. So I am going to select the radial kernel gotten above and just tune cost budget with it.`
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+set.seed(123)
+SVM_C <- tune(svm, Private ~ ., data = College,
+              ranges = list(cost = seq(.1, 3.0, 0.1), kernel = "radial"))
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+summary(SVM_C)
+```
+
+## Best parameters are cost = 2.4, and kernel = radial
+
+-   Let's create the final Best model.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+SVM_all <- svm(as.factor(host_is_superhost) ~ ., data = trainData, kernel = "radial", cost = 2.4)
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+Yhat_all <- predict(SVM_all, newdata = testData)
+table(Yhat_all, testData$host_is_superhost)
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# Check the performance on the test set
+mean(Yhat_all == testData$host_is_superhost)
+```
+
+## Incredible! With SVM, we reached a whopping 81% accuracy on the test set. That's so impressive for this task.
+
+## Final Note.
+
+`SVM is one of the most power machine learning algorithm that exists today. It is effective in high dimensional spaces, works well with a clear margin of separation but it require a robust hyperparameter tuning. Careful tuning can help with selection of the right kernel and cost budget for the data.`
+
+## Regression
+
+This data set contains information about prices, location, reviews, room types, host and more for over 30000 room listings. On this project, we will be using this data set to train a machine learning algorithm in order to do regression on prices.\
+The data contains over 75 columns and 38,792 rows/observations. We will only choose certain number of columns as predictor variables. We choose price to be our dependent variable and 14 columns/variables as our independent variables as listed below. . Since, some of this variables are catagorical variable the total number of predictors will be eventually be close to 20 since many algorithms might hot encode or add dummy varibales for catogorical features under the hood  
+
+Dependent variable:   price.\
+
+Independent Variables.\
+
+room_type.\
+neighbourhood_group_cleansed.\
+instant_bookable.\
+bedrooms.\
+minimum_nights.   maximum_nights.   latitude.   longitude.\
+availability_30 accommodates.\
+host_listings_count.\
+host_total_listings_count.\
+host_is_superhost.\
+review_scores_rating.\
+
+# 1. Loading the Data.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+glimpse(df)
+```
+
+# 2. Data Transformation
+
+Creating Training and testing data. We wtook 70% of the data for the training and 30% of the data for testing previosuly.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+train <- train_reg
+test <- test_reg
+
+```
+
+Filter the columns that we need from the Dataset for regression.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+train <- train%>%select(price, room_type, neighbourhood_group_cleansed, instant_bookable, bedrooms, 
+                            minimum_nights, maximum_nights, latitude, longitude, availability_30, accommodates,
+                            host_listings_count, host_total_listings_count, 
+                            host_is_superhost, review_scores_rating) 
+test <- test%>%select(price, room_type, neighbourhood_group_cleansed, instant_bookable, bedrooms, 
+                            minimum_nights, maximum_nights, latitude, longitude, availability_30, accommodates,
+                            host_listings_count, host_total_listings_count, 
+                            host_is_superhost, review_scores_rating) 
+
+```
+
+Count the NAS for each column on the training set. There are some columns that have a lot of NA values in them. For example bedrooms and review_scores_rating have over 7000 NA observations in them. Instead of removing those observations we will be replace the NA values with the median of their respective columns. Since that is a lot of observations (around 25% of the data) we didnt want to remove them. We felt replacing the values with the median will do.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+train%>% summarise(across(everything(), ~ sum(is.na(.))))
+
+```
+
+Replace with median for reviewScore and number of bedrooms. We will also use the medians of the training columns to fill on the test set as well.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+medianReviewScore <-  median(train$review_scores_rating, na.rm=TRUE )
+medianBedRooms <-  median(train$bedrooms, na.rm=TRUE )
+train <- train %>% mutate(across(review_scores_rating, ~replace_na(., median(., na.rm=TRUE))))
+train <- train %>% mutate(across(bedrooms, ~replace_na(., median(., na.rm=TRUE))))
+train%>% summarise(across(everything(), ~ sum(is.na(.))))
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+train%>%head(3)
+
+```
+
+Transform price column. remove the dollar sign from the columns
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+train <- train%>%mutate(price = as.numeric( str_replace(train$price, "\\$", "") ) ) %>% na.omit()
+
+train%>% summarise(across(everything(), ~ sum(is.na(.))))
+```
+
+Transform the test set as well . We will use the medians of the training set to fill those NA values on the test set.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+test <- test %>% mutate(across(review_scores_rating, ~replace_na(., medianReviewScore)))
+test <- test %>% mutate(across(bedrooms, ~replace_na(., medianBedRooms)))
+test <- test%>%mutate(price = as.numeric( str_replace(test$price, "\\$", "") ) ) %>% na.omit()
+test%>% summarise(across(everything(), ~ sum(is.na(.))))
+
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+nrow(train)
+nrow(test)
+
+```
+
+Let us investigate the varince inflation factor of each variable. It seems like variables such as neighbourhood_group_cleansed, host_listings_count, host_total_listings_count have VIF of 8 and above. Having them in the model\
+inflates the variances of the the other variables by more than 8. So it is clear that there is some correlation among these variables.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+reg <- lm(price ~ . , data = train)
+vif(reg)
+
+```
+
+Now let us look at the summary to see if there are extreme values. We can see maximum_nights have extreme values that dont make sense. The maximum maximum_nights is 2.147e+09 days. We would normally expect maximum nights to be a year or maybe couple of of years depending on the policy of Airbnb. But this values seems extreme. Although we are not going to remove it from our model (we would expect our machine lerning algorithm to give less emphasis on it during training as there are few observations with that extreme value), it is important to note it here. If we remove it from the training set we also have to remove it from the test set. if we transform it on the training set, we might have to transform it on the test set as well.\
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+summary(train)
+
+```
+
+# 3.Training our machine learning algorithms.
+
+Now we have cleaned and transformed the data. let us go through the training phase using three or four Machine learning algorithms. We will use lasso regression, ridge regression, PCA and random forest regressor.\
+
+Let us Find the best lambda for lasso. We will do cross validation on the training set and choose the best lambda parameter. (glmnet by default will do 10 fold cross validation)
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+set.seed(1234)
+reg <- lm(price ~ ., data = train) 
+x <- model.matrix(reg)[,-1]
+y <-  train$price
+# 10 fold cross validation 
+lassoModel <- cv.glmnet(x, y, alpha = 1)
+
+plot(lassoModel)
+
+```
+
+The Best lassoModel with the minimum squared error was lambda of 0.089 at MSE of 13234. And the lambda that gives the most regularized model where the cross validated error is with in one standard error of lamdda min is lambda 4.837. It resulted in an cross validated MSE error of 13560. The glmnet package often chooses it as it is more regularized (avoid overfitting more).
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+lassoModel
+```
+
+Let us also see which variables have been chosen by each lasso model. 15 variables (this includes dummy variables that are introduced as part of transformation of catagorical variables such as neighbourhood_group_cleansed ) were chosen by lambda 1se.\
+
+20 variables were chosen by Lambda min.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+ 
+coef(lassoModel, s = "lambda.1se") |> round(2)
+
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+coef(lassoModel, s = "lambda.min") |> round(2)
+
+```
+
+Looking at the plot how the coeefiecnts decrease and gets eliminated as lambda increases.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+lr <- glmnet(x, y)
+plot(lr, xvar = "lambda", label = TRUE)
+
+```
+
+So based on cross validation we have chosen the lambda values for our lasso regression. We can retrain on the whole training set (as we often do after choosing our best parameters using cross validation ) using the lamda min or lambda 1se but glmnet package already does that so no need to do that here. The code down below, will gave us almost the same results on the test set. (we are not running it here)
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+#test_reg <- lm(price ~ ., data = test)
+# transform the test data set in a matrix form 
+#x_test <- model.matrix(test_reg)[,-1]
+#y_test <- test$price
+
+# retraining on the whole training set using 1se. 
+#lmabda_opt=lassoModel$lambda.1se
+#fit_2 <- glmnet(x, y,lambda = lmabda_opt)
+
+#pred_test <- bind_cols(predict(lassoModel, newx = x_test, s = "lambda.1se"), predict(fit_2, newx = x_test))
+
+
+#round(colMeans((pred_test - y_test)^2), digits = 2)
+
+```
+
+# Performance of lasso on the test set.
+
+Test it on the test set. We will gauge the performance of lasso using the lambda min and lambda 1se.\
+
+lambda.min performed better with MSE error of 13305.35 . So based on its performance on the test set, lambda min of 0.089 is the chosen model for lasso. We will use this performance (13305.35 ) to check if its performance is better than the best random forest regressor or ridge regression on the test set.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+test_reg <- lm(price ~ ., data = test)
+# transform the test data set in a matrix form 
+x_test <- model.matrix(test_reg)[,-1]
+y_test <- test$price
+
+
+
+pred_test <- bind_cols(predict(lassoModel, newx = x_test, s = "lambda.1se"), predict(lassoModel, newx = x_test, s = "lambda.min") )
+
+
+round(colMeans((pred_test - y_test)^2), digits = 2)
+
+```
+
+# Ridge Regression
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+set.seed(1234)
+reg <- lm(price ~ ., data = train) 
+x <- model.matrix(reg)[,-1]
+y <-  train$price
+# 10 fold cross validation 
+ridgeModel <- cv.glmnet(x, y, alpha = 0)
+
+plot(ridgeModel)
+
+```
+
+Ridge Model: The best lamda was 7.18 with a cross validated mean squared error of 13327. The 1se lamda gave us a cross validated error of 13708. All 19 variables (including the dummy ones) were chosen as is the case for a ridge regression.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+ridgeModel
+```
+
+Plot shwing how the coeffiecients decrease as lambda increases.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+lr <- glmnet(x, y, alpha=0)
+plot(lr, xvar = "lambda", label = TRUE)
+
+```
+
+# Performance of Ridge on the test set.
+
+Here on the test set (just like the lasoo), the model with lambda min performed better on the test set. The MSE error on the test set for lambda.min was 13323.68 and 13753.10for lambda.1se. So based on its performance on the test set, we will choose the Rddge regression model lambda.min (lambda of 7.18 ) as our best candidate for ridge with a test set performance of 13323.68 This is slighly higher than what we got for lasso (13305.35). So, so far the lasso model with its minimum lambda is our preferred model based on its performance on the test set.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+test_reg <- lm(price ~ ., data = test)
+# transform the test data set in a matrix form 
+x_test <- model.matrix(test_reg)[,-1]
+y_test <- test$price
+
+
+
+pred_test <- bind_cols(predict(ridgeModel, newx = x_test, s = "lambda.1se"), predict(ridgeModel, newx = x_test, s = "lambda.min") )
+
+
+round(colMeans((pred_test - y_test)^2), digits = 2)
+
+```
+
+# Random Forest
+
+Random Forest . Since it was running very slow we only decided to tune the number of trees. We decided to use the default mtry here. The default is square root of total number of features. (square root of 14 which is close to 3). For now using 100 trees (but will increase it to 200 or the default 500 trees). We dont need to do a separate cross validation for random forest regressor as it uses out of bag samples to calculate the out of bag error. There were will be good number of observations that wont be picked in the bootstrapped sample of a tree. So it can treat those out of bag samples as a test set and use the trees that an observation isnt picked in to predict the price for the observation\
+The key point here is testing on out of bag sample here serves the same purpose that a cross validation will do on validation sets and we get that cheapily by the very nature of bootstrapping in random forest.\
+
+Based on that we got a random forest with 99 trees to perform the best.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+set.seed(123)
+RF <- randomForest(price ~ ., data = train, ntree=100)
+ 
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+which.min(RF$mse)
+```
+
+# Performance of Random Forest on the test set.
+
+.Now let us see its performance on the test set using 100 trees. We got MSE error of 8216.3. So far this is the lowest MSE on the test set compared to lasso regression and Ridge regression. The random forest regressor might have worked better because there might be complex non linear relationships between price and the dependent variables.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+set.seed(123)
+y_test <- test$price
+
+RF <- randomForest(price ~ ., data = train, ntree=which.min(RF$mse))
+yhat = predict(RF, newdata = test)
+round(mean((yhat - y_test)^2), digits = 2)
+
+```
+
+# Principal components .
+
+# To Do
+
+Dhruv part down below:
+
+By running principal component analysis, Specifically partial least square regression, we were able to do cross validation to choose the best number of components. Based on the cross validated error amount or based on the root mean square error on the cross validation, the smallest adjCV was 115. That happened when we use 7 components. So based on cross validation we choose using 7 components for PLSR.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+library(pls)
+pls_reg <- plsr(price ~ ., data = train, scale = TRUE,
+                validation = "CV")
+summary(pls_reg)
+
+
+```
+
+Plotting the vaidation plot graph. looks like the minimum RMSEP (root mean square is around 7 compoennts)
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+validationplot(pls_reg)
+
+
+```
+
+Running it on the test set, we got a mean squared error of 13318.93. This is the highest mean squared error on the test set so far. So we will not be chooosing it as our final model. So far the random forest regressor had the best mean squared error.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+y_test <- test$price
+yhat =  predict(pls_reg, test, ncomp = 7)
+round(mean((yhat - y_test)^2), digits = 2)
+
+
+```
+
+## conclusion.
+
+Based on the performace on the test set, Random forest with 100 trees was the best performer. For that reason we choose that as our final model.\
+
+To recap, we used lasso, ridge, plsr and random forest regressor. For each model, we did cross validation to choose the best lambda for lasso, the best lamda for ridge, the best number of trees for random forest regressor and the best number of components for plsr using the training set and doing 10 fold cross validation. After we choose the best hyparams for these four models, we tested them again on the test set. Then based on the performance on the test set, we choose random forest regressor since it had the minimum mean squared error on the test set.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+knitr::knit_exit()
+```
