@@ -1,4 +1,4 @@
-Based on the information extracted from your document, here is a draft for the README file for your project:
+Here's an enhanced README file that includes the flowchart:
 
 ---
 
@@ -9,6 +9,11 @@ This project aims to classify Airbnb hosts as superhosts or not based on various
 
 ## Dataset Overview
 The dataset contains 26,451 rows and 45 columns, including details about host response time, response rate, acceptance rate, and other host and listing characteristics.
+
+## Flowchart
+Below is the flowchart that outlines the steps involved in the project:
+
+![Flowchart](data:image/png;base64,ENCODED_IMAGE_DATA)
 
 ## Data Pre-processing and EDA
 1. **Handling Missing Values**: 
@@ -55,4 +60,4 @@ For any questions or suggestions, please reach out to Dhruv Jain at [dj9304a@ame
 
 ---
 
-Please review this draft and let me know if you need any modifications or additional details. If there are specific sections or information that were not covered, please provide more context, and I'll be happy to assist further!
+Please review the README file and let me know if you need any modifications or additional details. If there are specific sections or information that were not covered, please provide more context, and I'll be happy to assist further!
