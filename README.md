@@ -61,5 +61,3 @@ Random Forest Regressor was selected as the final model due to its superior perf
 For any questions or suggestions, please reach out to Dhruv Jain at [dj9304a@american.edu](mailto:dj9304a@american.edu).
 
 ---
-
-Please review the README file and let me know if you need any modifications or additional details. If there are specific sections or information that were not covered, please provide more context, and I'll be happy to assist further!
