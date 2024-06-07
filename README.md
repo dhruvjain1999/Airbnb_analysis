@@ -1,6 +1,6 @@
 Here's an enhanced README file that includes the flowchart:
-**![image](https://github.com/dhruvjain1999/Airbnb_analysis/assets/123019863/e9f36c72-07bc-4feb-9762-bc14333e36e9)
-**
+![image](https://github.com/dhruvjain1999/Airbnb_analysis/assets/123019863/e9f36c72-07bc-4feb-9762-bc14333e36e9)
+
 
 ---
 
